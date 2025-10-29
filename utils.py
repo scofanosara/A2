@@ -2,100 +2,156 @@
 import pandas as pd
 import re
 import difflib
+import unicodedata
+from typing import List, Dict, Any
 
-def load_principios(path="data/principios.csv"):
+# =============================
+# Normalização
+# =============================
+
+def _strip_accents(s: str) -> str:
+    if s is None:
+        return ""
+    return "".join(c for c in unicodedata.normalize('NFD', s) if not unicodedata.combining(c))
+
+def normalize_text(text: str) -> str:
+    text = (text or "").casefold()
+    text = _strip_accents(text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def extract_tokens(text: str) -> List[str]:
+    return normalize_text(text).split()
+
+# =============================
+# Base de dados
+# =============================
+
+def _split_kws(s: str) -> List[str]:
+    parts = [p.strip() for p in str(s or "").split(";") if p.strip()]
+    return [normalize_text(p) for p in parts]
+
+def load_principios(path: str = "data/principios.csv") -> pd.DataFrame:
     df = pd.read_csv(path, dtype=str).fillna("")
-    # convert weight to numeric if possible
+
+    # weight numérico
     if "weight" in df.columns:
         df["weight"] = pd.to_numeric(df["weight"], errors="coerce").fillna(1).astype(int)
     else:
         df["weight"] = 1
-    df["keywords_list"] = df["keywords"].apply(lambda s: [k.strip().lower() for k in s.split(";") if k.strip()])
+
+    # checagem de colunas obrigatórias
+    required = {"case_id", "case_title", "case_description", "side",
+                "principle", "article", "weight", "keywords"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Faltam colunas no CSV: {', '.join(sorted(missing))}")
+
+    # keywords enriquecidas com principle e article (cobre quem digita 'art 196', etc.)
+    df["keywords_list"] = df.apply(
+        lambda r: list(dict.fromkeys(
+            _split_kws(r.get("keywords", "")) +
+            _split_kws(r.get("principle", "")) +
+            _split_kws(r.get("article", ""))
+        )),
+        axis=1
+    )
     return df
 
-def normalize_text(text):
-    text = text.lower()
-    text = re.sub(r'[^a-z0-9à-úç\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+# =============================
+# Matching
+# =============================
 
-def extract_tokens(text):
-    text = normalize_text(text)
-    tokens = text.split()
-    return tokens
-
-def match_by_keywords(user_text, keywords_list, threshold=0.8):
+def match_by_keywords(user_text: str, keywords_list: List[str], threshold: float = 0.80) -> bool:
     """
-    Retorna True se alguma keyword aparece no texto do usuário com correspondência exata ou fuzzy.
-    Usa correspondência exata de substring e, se não, difflib para aproximação entre palavras.
+    True se alguma keyword casa com o texto do usuário (substring direta ou fuzzy).
+    Faz pré-processamento uma única vez por chamada.
     """
     norm = normalize_text(user_text)
+    tokens = extract_tokens(user_text)
+
     for kw in keywords_list:
+        if not kw:
+            continue
+
+        # 1) substring direta
         if kw in norm:
             return True
-        # fuzzy match: compare kw to tokens or sequences
-        tokens = extract_tokens(norm)
-        # check close matches among tokens
-        close = difflib.get_close_matches(kw, tokens, n=1, cutoff=threshold)
-        if close:
+
+        # 2) fuzzy por tokens individuais
+        if difflib.get_close_matches(kw, tokens, n=1, cutoff=threshold):
             return True
-        # check if kw is multiword: try sliding windows
+
+        # 3) fuzzy para expressões multi-palavra (janelas deslizantes)
         kw_tokens = kw.split()
         if len(kw_tokens) > 1:
-            for i in range(len(tokens)-len(kw_tokens)+1):
-                seq = " ".join(tokens[i:i+len(kw_tokens)])
+            for i in range(len(tokens) - len(kw_tokens) + 1):
+                seq = " ".join(tokens[i:i + len(kw_tokens)])
                 if difflib.SequenceMatcher(None, seq, kw).ratio() >= threshold:
                     return True
     return False
 
-def evaluate_arguments(case_id, side, user_text, df_principios):
+# =============================
+# Avaliação
+# =============================
+
+def evaluate_arguments(case_id: Any, side: str, user_text: str,
+                       df_principios: pd.DataFrame, threshold: float = 0.80) -> Dict[str, Any]:
     """
     Retorna:
-     - score_total
-     - matched_rows (list of dicts)
-     - missing_recommendations (list of dicts)
+      - score: soma dos pesos dos princípios identificados
+      - matched: lista de itens identificados
+      - recommended: lista de itens relevantes não mencionados
+      - counterarguments: itens do lado oposto (para preparar réplica)
     """
-    df_case = df_principios[(df_principios["case_id"].astype(str)==str(case_id)) & (df_principios["side"].str.lower()==side.lower())]
-    # If there are no entries for that side => recommend the other side's principles as cross-check
-    df_case_all = df_principios[df_principios["case_id"].astype(str)==str(case_id)]
-    matched = []
+    case_str = str(case_id)
+    side_norm = normalize_text(side)
+
+    df_case_all = df_principios[df_principios["case_id"].astype(str) == case_str]
+    df_case = df_case_all[df_case_all["side"].str.casefold().apply(normalize_text) == side_norm]
+
+    matched: List[Dict[str, Any]] = []
+    recommended: List[Dict[str, Any]] = []
     score = 0
+
+    # evita recalcular match para o mesmo índice
+    found_cache: Dict[int, bool] = {}
+
     for idx, row in df_case.iterrows():
-        kw_list = row["keywords_list"]
-        found = match_by_keywords(user_text, kw_list)
+        found = match_by_keywords(user_text, row["keywords_list"], threshold=threshold)
+        found_cache[idx] = found
         if found:
-            score += int(row.get("weight",1))
+            w = int(row.get("weight", 1))
+            score += w
             matched.append({
                 "principle": row["principle"],
                 "article": row["article"],
-                "weight": int(row.get("weight",1)),
-                "matched_keyword_sample": ";".join(kw_list[:2])
+                "weight": w,
+                "matched_keyword_sample": ";".join(row["keywords_list"][:2])
             })
-    # Recommendations: which important principles for this side were NOT mentioned by the user
-    recommended = []
+
     for idx, row in df_case.iterrows():
-        kw_list = row["keywords_list"]
-        found = match_by_keywords(user_text, kw_list)
-        if not found:
+        if not found_cache.get(idx, False):
             recommended.append({
                 "principle": row["principle"],
                 "article": row["article"],
-                "weight": int(row.get("weight",1)),
-                "keywords": kw_list
+                "weight": int(row.get("weight", 1)),
+                "keywords": row["keywords_list"]
             })
-    # Also provide "contra-argumentos" (o que a outra parte pode alegar):
-    contra = []
-    df_other_side = df_case_all[df_case_all["side"].str.lower() != side.lower()]
-    for idx, row in df_other_side.iterrows():
-        contra.append({
-            "principle": row["principle"],
-            "article": row["article"],
-            "weight": int(row.get("weight",1)),
-            "keywords": row["keywords_list"]
-        })
+
+    # contra-argumentos: tudo do outro lado
+    df_other_side = df_case_all[df_case_all["side"].str.casefold().apply(normalize_text) != side_norm]
+    counterarguments = [{
+        "principle": r["principle"],
+        "article": r["article"],
+        "weight": int(r.get("weight", 1)),
+        "keywords": r["keywords_list"]
+    } for _, r in df_other_side.iterrows()]
+
     return {
         "score": score,
         "matched": matched,
         "recommended": recommended,
-        "counterarguments": contra
+        "counterarguments": counterarguments
     }
