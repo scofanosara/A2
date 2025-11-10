@@ -6,14 +6,16 @@ import io
 import csv
 import datetime
 
-st.set_page_config(page_title="Simulador Jurídico para Estudantes", layout="wide")
+st.set_page_config(
+    page_title="Simulador Jurídico para Estudantes", layout="wide")
 st.title("Simulador Jurídico para Estudantes ⚖️")
 
 # -----------------------
 # Fonte de dados (sidebar)
 # -----------------------
 st.sidebar.header("Fonte de dados")
-use_sample = st.sidebar.checkbox("Usar base padrão (data/principios.csv)", True)
+use_sample = st.sidebar.checkbox(
+    "Usar base padrão (data/principios.csv)", True)
 uploaded = st.sidebar.file_uploader("Ou envie um CSV próprio", type=["csv"])
 
 if uploaded is not None:
@@ -21,7 +23,8 @@ if uploaded is not None:
 elif use_sample:
     df_princ = load_principios("data/principios.csv")
 else:
-    st.warning("Selecione 'Usar base padrão' ou faça upload de um CSV para continuar.")
+    st.warning(
+        "Selecione 'Usar base padrão' ou faça upload de um CSV para continuar.")
     st.stop()
 
 # Validação mínima de colunas (evita erro mais à frente)
@@ -67,7 +70,8 @@ st.write(case_info["case_description"])
 # Entrada do usuário
 # -----------------------
 # IMPORTANTE: usar uma variável diferente ('side_choice') para evitar colisão
-side_choice = st.radio("Você vai atuar como:", ["acusacao", "defesa"], index=0, key="side_radio")
+side_choice = st.radio("Você vai atuar como:", [
+                       "acusacao", "defesa"], index=0, key="side_radio")
 
 st.markdown("### Digite os princípios / artigos / argumentos que você usaria")
 user_text = st.text_area(
@@ -88,15 +92,17 @@ with st.expander("Debug – ver o que conta ponto neste caso/lado (opcional)"):
 # -----------------------
 if st.button("Avaliar argumentação"):
     with st.spinner("Avaliando..."):
-        result = evaluate_arguments(case_choice, side_choice, user_text, df_princ)
+        result = evaluate_arguments(
+            case_choice, side_choice, user_text, df_princ)
 
     score = result["score"]
-    st.success(f"Pontuação obtida: {score} pontos")
+    st.success(f"Pontuação obtida: {score:.1f} pontos")
 
     st.markdown("#### Argumentos identificados (match automático)")
     if result["matched"]:
         for m in result["matched"]:
-            st.write(f"- **{m['principle']}** — {m['article']} (peso {m['weight']})")
+            st.write(
+                f"- **{m['principle']}** — {m['article']} (peso {m['weight']})")
     else:
         st.info(
             "Nenhum princípio claramente identificado pelo algoritmo a partir do texto. "
@@ -111,7 +117,8 @@ if st.button("Avaliar argumentação"):
                 f"palavras-chave esperadas: {', '.join(r['keywords'])}"
             )
     else:
-        st.write("Excelente — você citou todos os princípios principais previstos para sua posição.")
+        st.write(
+            "Excelente — você citou todos os princípios principais previstos para sua posição.")
 
     st.markdown("#### O que a parte contrária pode alegar")
     if result["counterarguments"]:
@@ -158,7 +165,8 @@ if st.button("Avaliar argumentação"):
         fieldnames = sorted(all_keys)
 
         sio = io.StringIO()
-        writer = csv.DictWriter(sio, fieldnames=fieldnames, extrasaction="ignore")
+        writer = csv.DictWriter(
+            sio, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in report_rows:
             writer.writerow(row)
